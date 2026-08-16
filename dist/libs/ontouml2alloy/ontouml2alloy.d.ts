@@ -1,0 +1,44 @@
+import { OntoumlElement, Project, Package } from '../ontouml';
+import { Service, ServiceIssue } from '..';
+export declare class Ontouml2Alloy implements Service {
+    model: Package;
+    alloyCode: string[];
+    datatypes: [string, string[]][];
+    enums: string[];
+    worldFieldDeclarations: string[];
+    worldFieldFacts: string[];
+    facts: string[];
+    relationPropertiesFacts: string[];
+    funs: string[];
+    visible: string[];
+    aliases: [OntoumlElement, string][];
+    constructor(input: Project | Package, options?: null);
+    getAlloyCode(): string[];
+    addDatatype(datatype: [string, string[]]): void;
+    addEnum(_enum: string): void;
+    addWorldFieldDeclaration(declaration: string): void;
+    addWorldFieldFact(fact: string): void;
+    addFact(fact: string): void;
+    addRelationPropertiesFact(relationPropertiesFact: string): void;
+    addFun(fun: string): void;
+    addVisible(term: string): void;
+    transform(): void;
+    writePreamble(): void;
+    writeDatatypes(): void;
+    writeEnums(): void;
+    writeWorldSignature(): void;
+    writeFacts(): void;
+    writeFuns(): void;
+    writeRuns(): void;
+    writeWorldStructureModule(): void;
+    writeOntologicalPropertiesModule(): void;
+    transformClasses(): boolean;
+    transformGeneralizations(): void;
+    transformGeneralizationSets(): void;
+    transformRelations(): void;
+    transformProperties(): void;
+    run(): {
+        result: any;
+        issues?: ServiceIssue[];
+    };
+}

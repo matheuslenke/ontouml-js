@@ -122105,6 +122105,7 @@ __export(src_exports, {
   NodeView: () => NodeView,
   ORDERLESS_LEVEL: () => ORDERLESS_LEVEL,
   OntologicalNature: () => OntologicalNature,
+  Ontouml2Alloy: () => Ontouml2Alloy,
   Ontouml2Db: () => Ontouml2Db,
   Ontouml2DbOptions: () => Ontouml2DbOptions,
   Ontouml2Gufo: () => Ontouml2Gufo5,
@@ -125930,6 +125931,915 @@ var Modularizer = class {
     let gsInvolvesAll = this.project.getGeneralizationSetsInvolvingAll(referenceGens);
     let partitionInvolvesAny = this.project.getGeneralizationSetsInvolvingAny(referenceGens).filter((gs) => gs.isPhasePartition());
     return [...gsInvolvesAll, ...partitionInvolvesAny];
+  }
+};
+
+// src/libs/ontouml2alloy/util.ts
+function getNameNoSpaces(element) {
+  return element.getName().replace(/\s/g, "");
+}
+function isTopLevel(_class, generalizations) {
+  for (const gen of generalizations) {
+    if (gen.involvesClasses() && gen.getSpecificClass() == _class) {
+      return false;
+    }
+  }
+  return true;
+}
+function getCardinalityKeyword(cardinality) {
+  if (cardinality.isBounded()) {
+    if (cardinality.isZeroToOne()) {
+      return "lone";
+    } else if (cardinality.isOneToOne()) {
+      return "one";
+    } else if (cardinality.isZeroToMany()) {
+      return "set";
+    } else if (cardinality.isOneToMany()) {
+      return "some";
+    }
+  }
+  return "";
+}
+function isCustomCardinality(cardinality) {
+  if (cardinality.isZeroToOne() || cardinality.isOneToOne() || cardinality.isZeroToMany() || cardinality.isOneToMany()) {
+    return false;
+  }
+  return true;
+}
+function getCustomCardinality(cardinality) {
+  let lowerBound = null;
+  let upperBound = null;
+  if (!cardinality.isLowerBoundValid()) {
+    lowerBound = cardinality.lowerBound;
+  }
+  if (!cardinality.isUpperBoundValid()) {
+    upperBound = cardinality.upperBound;
+  }
+  return [lowerBound, upperBound];
+}
+function getValidAlias(element, name, aliases) {
+  const foundAlias = aliases.find((a) => {
+    return a[0] === element;
+  });
+  if (foundAlias) {
+    return foundAlias[1];
+  } else {
+    let i = 1;
+    while (aliases.some((a) => {
+      return a[1] === name + i;
+    })) {
+      i++;
+    }
+    aliases.push([element, name + i]);
+    return name + i;
+  }
+}
+function isMaterialConnectedToDerivation(material, relations) {
+  if (material.hasMaterialStereotype()) {
+    for (const rel of relations) {
+      if (rel.hasDerivationStereotype() && rel.getDerivingRelation() === material && rel.getDerivedClassStereotype() === "relator" /* RELATOR */) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+function holdsBetweenDatatypes(relation) {
+  if (relation.getSourceStereotype() === "datatype" /* DATATYPE */ && relation.getTargetStereotype() === "datatype" /* DATATYPE */) {
+    return true;
+  }
+  return false;
+}
+function getCorrespondingDatatype(datatypeName, datatypes) {
+  for (const datatype of datatypes) {
+    if (datatype[0] === datatypeName) {
+      return datatype;
+    }
+  }
+  return null;
+}
+
+// src/libs/ontouml2alloy/property_functions.ts
+function transformProperty(transformer, property) {
+  if (property.container instanceof Class && property.container.hasDatatypeStereotype()) {
+    transformDatatypeAttribute(transformer, property);
+    return;
+  } else if (property.container instanceof Relation3 && holdsBetweenDatatypes(property.container)) {
+    return;
+  }
+  if (property.isAttribute()) {
+    if (property.isOrdered) {
+      transformOrderedAttribute(transformer, property);
+    } else {
+      transformGeneralAttribute(transformer, property);
+    }
+  } else if (property.isRelationEnd()) {
+    if (property.container instanceof Relation3 && property.container.hasDerivationStereotype()) {
+      return;
+    }
+    if (property.container instanceof Relation3 && property.container.getSourceEnd() === property) {
+      transformRelationSourceEnd(transformer, property);
+    } else {
+      transformRelationTargetEnd(transformer, property);
+    }
+  }
+}
+function transformOrderedAttribute(transformer, attribute) {
+  const attributeName = getNameNoSpaces(attribute);
+  const ownerClassName = getNameNoSpaces(attribute.container);
+  const datatypeName = getNameNoSpaces(attribute.propertyType);
+  const funAlias = getValidAlias(attribute, attributeName, transformer.aliases);
+  transformer.addWorldFieldDeclaration(
+    attributeName + ": set " + ownerClassName + " set -> set Int set -> set " + datatypeName
+  );
+  transformer.addFact(
+    "fact ordering {\n        all w: World, x: w." + ownerClassName + " | isSeq[x.(w." + attributeName + ")]\n        all w: World, x: w." + ownerClassName + ", y: w." + ownerClassName + " | lone x.((w." + attributeName + ").y)\n}"
+  );
+  transformer.addFun(
+    "fun " + funAlias + " [x: World." + ownerClassName + ", w: World] : set " + datatypeName + " {\n        x.(w." + attributeName + ")\n}"
+  );
+  if (attribute.isReadOnly) {
+    transformer.addRelationPropertiesFact(
+      "immutable_target[" + ownerClassName + "," + attributeName + "]"
+    );
+  }
+}
+function transformGeneralAttribute(transformer, attribute) {
+  const attributeName = getNameNoSpaces(attribute);
+  const ownerClassName = getNameNoSpaces(attribute.container);
+  const datatypeName = getNameNoSpaces(attribute.propertyType);
+  const cardinality = getCardinalityKeyword(attribute.cardinality);
+  const funAlias = getValidAlias(attribute, attributeName, transformer.aliases);
+  transformer.addWorldFieldDeclaration(
+    (attributeName + ": set " + ownerClassName + " set -> " + cardinality + " " + datatypeName).replace(/\s{2,}/g, " ")
+  );
+  transformer.addFun(
+    "fun " + funAlias + " [x: World." + ownerClassName + ", w: World] : set " + datatypeName + " {\n        x.(w." + attributeName + ")\n}"
+  );
+  if (attribute.isReadOnly) {
+    transformer.addRelationPropertiesFact(
+      "immutable_target[" + ownerClassName + "," + attributeName + "]"
+    );
+  }
+  if (isCustomCardinality(attribute.cardinality)) {
+    const [lowerBound, upperBound] = getCustomCardinality(attribute.cardinality);
+    if (lowerBound && upperBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + ownerClassName + " | #" + funAlias + "[x,w]>=" + lowerBound + " and #" + funAlias + "[x,w]<=" + upperBound + "\n}"
+      );
+    } else if (lowerBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + ownerClassName + " | #" + funAlias + "[x,w]>=" + lowerBound + "\n}"
+      );
+    } else if (upperBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + ownerClassName + " | #" + funAlias + "[x,w]<=" + upperBound + "\n}"
+      );
+    }
+  }
+  transformer.addVisible(
+    "select13[" + attributeName + "]"
+  );
+}
+function transformRelationSourceEnd(transformer, sourceEnd) {
+  let relationName = "";
+  if (sourceEnd.container.getName()) {
+    relationName = getNameNoSpaces(sourceEnd.container);
+  } else {
+    relationName = getValidAlias(sourceEnd.container, "relation", transformer.aliases);
+  }
+  const sourceName = getNameNoSpaces(sourceEnd.container.getSource());
+  let sourceEndName = "";
+  if (sourceEnd.getName()) {
+    sourceEndName = getNameNoSpaces(sourceEnd);
+  } else {
+    sourceEndName = sourceName;
+  }
+  const oppositeName = getNameNoSpaces(sourceEnd.container.getTarget());
+  const sourceEndAlias = getValidAlias(sourceEnd, sourceEndName, transformer.aliases);
+  if (isMaterialConnectedToDerivation(sourceEnd.container, transformer.model.getAllRelations()) || sourceEnd.isOrdered || sourceEnd.getOppositeEnd().isOrdered) {
+    transformer.addFun(
+      "fun " + sourceEndAlias + " [x: World." + oppositeName + ", w: World] : set World." + sourceName + " {\n        (select13[w." + relationName + "]).x\n}"
+    );
+  } else {
+    transformer.addFun(
+      "fun " + sourceEndAlias + " [x: World." + oppositeName + ", w: World] : set World." + sourceName + " {\n        (w." + relationName + ").x\n}"
+    );
+  }
+  if (sourceEnd.isReadOnly) {
+    transformer.addRelationPropertiesFact(
+      "immutable_source[" + oppositeName + "," + relationName + "]"
+    );
+  }
+  if (isCustomCardinality(sourceEnd.cardinality) || isMaterialConnectedToDerivation(sourceEnd.container, transformer.model.getAllRelations())) {
+    const [lowerBound, upperBound] = getCustomCardinality(sourceEnd.cardinality);
+    if (lowerBound && upperBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + oppositeName + " | #" + sourceEndAlias + "[x,w]>=" + lowerBound + " and #" + sourceEndAlias + "[x,w]<=" + upperBound + "\n}"
+      );
+    } else if (lowerBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + oppositeName + " | #" + sourceEndAlias + "[x,w]>=" + lowerBound + "\n}"
+      );
+    } else if (upperBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + oppositeName + " | #" + sourceEndAlias + "[x,w]<=" + upperBound + "\n}"
+      );
+    }
+  }
+}
+function transformRelationTargetEnd(transformer, targetEnd) {
+  let relationName = "";
+  if (targetEnd.container.getName()) {
+    relationName = getNameNoSpaces(targetEnd.container);
+  } else {
+    relationName = getValidAlias(targetEnd.container, "relation", transformer.aliases);
+  }
+  const targetName = getNameNoSpaces(targetEnd.container.getTarget());
+  let targetEndName = "";
+  if (targetEnd.getName()) {
+    targetEndName = getNameNoSpaces(targetEnd);
+  } else {
+    targetEndName = targetName;
+  }
+  const oppositeName = getNameNoSpaces(targetEnd.container.getSource());
+  const targetEndAlias = getValidAlias(targetEnd, targetEndName, transformer.aliases);
+  if (isMaterialConnectedToDerivation(targetEnd.container, transformer.model.getAllRelations()) || targetEnd.isOrdered || targetEnd.getOppositeEnd().isOrdered) {
+    transformer.addFun(
+      "fun " + targetEndAlias + " [x: World." + oppositeName + ", w: World] : set World." + targetName + " {\n        x.(select13[w." + relationName + "])\n}"
+    );
+  } else {
+    transformer.addFun(
+      "fun " + targetEndAlias + " [x: World." + oppositeName + ", w: World] : set World." + targetName + " {\n        x.(w." + relationName + ")\n}"
+    );
+  }
+  if (targetEnd.isReadOnly || targetEnd.container.hasMediationStereotype() || targetEnd.container.hasCharacterizationStereotype()) {
+    transformer.addRelationPropertiesFact(
+      "immutable_target[" + oppositeName + "," + relationName + "]"
+    );
+  }
+  if (isCustomCardinality(targetEnd.cardinality) || isMaterialConnectedToDerivation(targetEnd.container, transformer.model.getAllRelations())) {
+    const [lowerBound, upperBound] = getCustomCardinality(targetEnd.cardinality);
+    if (lowerBound && upperBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + oppositeName + " | #" + targetEndAlias + "[x,w]>=" + lowerBound + " and #" + targetEndAlias + "[x,w]<=" + upperBound + "\n}"
+      );
+    } else if (lowerBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + oppositeName + " | #" + targetEndAlias + "[x,w]>=" + lowerBound + "\n}"
+      );
+    } else if (upperBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all w: World, x: w." + oppositeName + " | #" + targetEndAlias + "[x,w]<=" + upperBound + "\n}"
+      );
+    }
+  }
+}
+function transformDatatypeAttribute(transformer, attribute) {
+  const attributeName = getNameNoSpaces(attribute);
+  const ownerDatatypeName = getNameNoSpaces(attribute.container);
+  const ownerDatatype = getCorrespondingDatatype(ownerDatatypeName, transformer.datatypes);
+  const cardinality = getCardinalityKeyword(attribute.cardinality);
+  const datatypeName = getNameNoSpaces(attribute.propertyType);
+  ownerDatatype[1].push((attributeName + ": " + cardinality + " " + datatypeName).replace(/\s{2,}/g, " "));
+  if (isCustomCardinality(attribute.cardinality)) {
+    const [lowerBound, upperBound] = getCustomCardinality(attribute.cardinality);
+    if (lowerBound && upperBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all x: " + ownerDatatype[0] + " | #x." + attributeName + ">=" + lowerBound + " and #x." + attributeName + "<=" + upperBound + "\n}"
+      );
+    } else if (lowerBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all x: " + ownerDatatype[0] + " | #x." + attributeName + ">=" + lowerBound + "\n}"
+      );
+    } else if (upperBound) {
+      transformer.addFact(
+        "fact multiplicity {\n        all x: " + ownerDatatype[0] + " | #x." + attributeName + "<=" + upperBound + "\n}"
+      );
+    }
+  }
+}
+
+// src/libs/ontouml2alloy/class_functions.ts
+function transformClass(transformer, _class) {
+  if (_class.hasAnyStereotype(["event" /* EVENT */, "situation" /* SITUATION */])) {
+    return;
+  }
+  if (_class.hasDatatypeStereotype()) {
+    transformDatatypeClass(transformer, _class);
+    return;
+  }
+  if (_class.hasEnumerationStereotype()) {
+    transformEnumerationClass(transformer, _class);
+    return;
+  }
+  if (_class.isRestrictedToEndurant()) {
+    transformEndurantClass(transformer, _class);
+  }
+  if (_class.hasRelatorStereotype()) {
+    transformRelatorConstraint(transformer, _class);
+  }
+  if (_class.isAbstract) {
+    transformAbstractClass(transformer, _class);
+  }
+  transformWeakSupplementationConstraint(transformer, _class);
+  transformDisjointNaturesConstraint(transformer, _class);
+}
+function transformAbstractClass(transformer, _class) {
+  const className = getNameNoSpaces(_class);
+  const subtypes = _class.getChildren().map((subtype) => "w." + getNameNoSpaces(subtype));
+  if (subtypes.length) {
+    transformer.addFact(
+      "fact abstractClass {\n        all w: World | w." + className + " = " + subtypes.join("+") + "\n}"
+    );
+  }
+}
+function transformEndurantClass(transformer, _class) {
+  const className = getNameNoSpaces(_class);
+  let nature = "";
+  if (_class.isRestrictedToSubstantial()) {
+    nature = "Object";
+  } else if (_class.isRestrictedToMoment()) {
+    nature = "Aspect";
+  } else {
+    nature = "Endurant";
+  }
+  transformer.addWorldFieldDeclaration(
+    className + ": set exists:>" + nature
+  );
+  if (isTopLevel(_class, transformer.model.getAllGeneralizations())) {
+    if (_class.hasRigidStereotype()) {
+      transformer.addFact(
+        "fact rigid {\n        rigidity[" + className + "," + nature + ",exists]\n}"
+      );
+    } else if (_class.hasAntiRigidStereotype()) {
+      transformer.addFact(
+        "fact antirigid {\n        antirigidity[" + className + "," + nature + ",exists]\n}"
+      );
+    }
+  }
+}
+function transformDatatypeClass(transformer, _class) {
+  const datatypeName = getNameNoSpaces(_class);
+  transformer.addDatatype([datatypeName, []]);
+}
+function transformEnumerationClass(transformer, _class) {
+  const enumName = getNameNoSpaces(_class);
+  const literals = _class.literals.map((literal4) => getNameNoSpaces(literal4));
+  if (literals.length) {
+    transformer.addEnum(
+      "enum " + enumName + " {\n        " + literals.join(", ") + "}"
+    );
+  }
+}
+function transformRelatorConstraint(transformer, _class) {
+  const mediations = [];
+  for (const mediation of transformer.model.getAllRelationsByStereotype("mediation" /* MEDIATION */)) {
+    if (mediation.getSource() == _class) {
+      const mediated = mediation.getTargetEnd();
+      let mediatedName = "";
+      if (mediated.getName()) {
+        mediatedName = getNameNoSpaces(mediated);
+      } else {
+        mediatedName = getNameNoSpaces(mediation.getTarget());
+      }
+      const mediatedAlias = getValidAlias(mediated, mediatedName, transformer.aliases);
+      mediations.push(mediatedAlias + "[x,w]");
+    }
+  }
+  if (mediations.length) {
+    const relatorName = getNameNoSpaces(_class);
+    transformer.addFact(
+      "fact relatorConstraint {\n        all w: World, x: w." + relatorName + " | #(" + mediations.join("+") + ")>=2\n}"
+    );
+  }
+}
+function transformWeakSupplementationConstraint(transformer, _class) {
+  let parts = [];
+  for (const rel of transformer.model.getAllRelations()) {
+    if (rel.isPartWholeRelation() || rel.hasComponentOfStereotype() || rel.hasMemberOfStereotype() || rel.hasSubCollectionOfStereotype() || rel.hasSubQuantityOfStereotype()) {
+      if (rel.getSource() === _class) {
+        const part = rel.getTargetEnd();
+        let partName = "";
+        if (part.getName()) {
+          partName = getNameNoSpaces(part);
+        } else {
+          partName = getNameNoSpaces(part.container.getTarget());
+        }
+        const partAlias = getValidAlias(part, partName, transformer.aliases);
+        parts.push(partAlias + "[x,w]");
+      }
+    }
+  }
+  if (parts.length) {
+    const wholeName = getNameNoSpaces(_class);
+    transformer.addFact(
+      "fact weakSupplementationConstraint {\n        all w: World, x: w." + wholeName + " | #(" + parts.join("+") + ")>=2\n}"
+    );
+  }
+}
+function transformDisjointNaturesConstraint(transformer, _class) {
+  if (!isTopLevel(_class, transformer.model.getAllGeneralizations())) {
+    return;
+  }
+  let differentNaturedClasses = [];
+  for (const otherClass of transformer.model.getAllClasses()) {
+    if (isTopLevel(otherClass, transformer.model.getAllGeneralizations()) && !otherClass.restrictedToContainedIn(_class.restrictedTo)) {
+      differentNaturedClasses.push(getNameNoSpaces(otherClass));
+    }
+  }
+  if (differentNaturedClasses.length) {
+    const className = getNameNoSpaces(_class);
+    if (differentNaturedClasses.length == 1) {
+      transformer.addWorldFieldFact(
+        "disjoint[" + className + "," + differentNaturedClasses[0] + "]"
+      );
+    } else {
+      transformer.addWorldFieldFact(
+        "disjoint[" + className + ",(" + differentNaturedClasses.join("+") + ")]"
+      );
+    }
+  }
+}
+function transformAdditionalClassConstraints(transformer) {
+  let objectClasses = [];
+  let aspectClasses = [];
+  for (const _class of transformer.model.getAllClasses()) {
+    if (_class.isRestrictedToEndurant() && isTopLevel(_class, transformer.model.getAllGeneralizations())) {
+      const className = getNameNoSpaces(_class);
+      if (_class.isRestrictedToSubstantial()) {
+        objectClasses.push(className);
+      } else if (_class.isRestrictedToMoment()) {
+        aspectClasses.push(className);
+      } else {
+        objectClasses.push(className);
+        aspectClasses.push(className);
+      }
+    }
+  }
+  if (objectClasses.length) {
+    transformer.addWorldFieldFact(
+      "exists:>Object in " + objectClasses.join("+")
+    );
+  }
+  if (aspectClasses.length) {
+    transformer.addWorldFieldFact(
+      "exists:>Aspect in " + aspectClasses.join("+")
+    );
+  }
+}
+function transformAdditionalDatatypeConstraints(transformer) {
+  const datatypes = transformer.model.getClassesWithDatatypeStereotype();
+  if (datatypes.length) {
+    const topLevelDatatypes = [];
+    for (const datatype of datatypes) {
+      if (isTopLevel(datatype, transformer.model.getAllGeneralizations())) {
+        topLevelDatatypes.push(datatype);
+      }
+    }
+    const datatypesNames = datatypes.map((datatype) => getNameNoSpaces(datatype));
+    if (topLevelDatatypes.length >= 2) {
+      const topLevelDatatypesNames = topLevelDatatypes.map((datatype) => getNameNoSpaces(datatype));
+      transformer.addFact(
+        "fact additionalDatatypeFacts {\n        Datatype = " + datatypesNames.join("+") + "\n        disjoint[" + topLevelDatatypesNames.join(",") + "]\n}"
+      );
+    } else {
+      transformer.addFact(
+        "fact additionalDatatypeFacts {\n        Datatype = " + datatypesNames.join("+") + "\n}"
+      );
+    }
+  }
+}
+
+// src/libs/ontouml2alloy/generalization_functions.ts
+function transformGeneralization(transformer, gen) {
+  const specificName = getNameNoSpaces(gen.specific);
+  const generalName = getNameNoSpaces(gen.general);
+  transformer.addFact(
+    "fact generalization {\n        " + specificName + " in " + generalName + "\n}"
+  );
+}
+
+// src/libs/ontouml2alloy/generalization_set_functions.ts
+function transformGeneralizationSet(transformer, genSet) {
+  if (!genSet.generalizations || genSet.generalizations.length === 0 || !genSet.isComplete && !genSet.isDisjoint) {
+    return;
+  }
+  const classChildren = genSet.generalizations.map((gen) => gen.specific).filter((child) => child.type === "Class" /* CLASS_TYPE */);
+  const onlyClassChildren = classChildren.length === genSet.generalizations.length;
+  if (!onlyClassChildren) {
+    return;
+  }
+  const classParents = genSet.generalizations.map((gen) => gen.getGeneralClass());
+  const onlyClassParent = classParents.length === genSet.generalizations.length;
+  const parent = genSet.getGeneralClass();
+  const uniqueParent = !!parent;
+  if (!uniqueParent || !onlyClassParent) {
+    return;
+  }
+  const children = genSet.generalizations.map((gen) => getNameNoSpaces(gen.specific));
+  let fact = "fact generalizationSet {\n";
+  if (genSet.isDisjoint)
+    fact += "        disjoint[" + children.join(",") + "]\n";
+  if (genSet.isComplete)
+    fact += "        " + getNameNoSpaces(parent) + " = " + children.join("+") + "\n";
+  fact += "}";
+  transformer.addFact(fact);
+}
+
+// src/libs/ontouml2alloy/relation_functions.ts
+function transformRelation(transformer, relation) {
+  if (holdsBetweenDatatypes(relation)) {
+    transformDatatypeRelation(transformer, relation);
+    return;
+  }
+  if (relation.hasDerivationStereotype()) {
+    transformDerivationRelation(transformer, relation);
+    return;
+  }
+  if (relation.hasMediationStereotype()) {
+    transformMediationRelation(transformer, relation);
+    return;
+  }
+  if (relation.hasMaterialStereotype()) {
+    transformMaterialRelation(transformer, relation);
+    return;
+  }
+  if (relation.isPartWholeRelation() || relation.hasComponentOfStereotype() || relation.hasMemberOfStereotype() || relation.hasSubCollectionOfStereotype() || relation.hasSubQuantityOfStereotype()) {
+    transformPartWholeRelation(transformer, relation);
+    return;
+  }
+  transformGeneralRelation(transformer, relation);
+}
+function transformOrderedRelation(transformer, relation) {
+  let relationName = "";
+  if (relation.getName()) {
+    relationName = getNameNoSpaces(relation);
+  } else {
+    relationName = getValidAlias(relation, "relation", transformer.aliases);
+  }
+  const sourceName = getNameNoSpaces(relation.getSource());
+  const targetName = getNameNoSpaces(relation.getTarget());
+  transformer.addWorldFieldDeclaration(
+    relationName + ": set " + sourceName + " set -> set Int set -> set " + targetName
+  );
+  transformer.addFact(
+    "fact ordering {\n        all w: World, x: w." + sourceName + " | isSeq[x.(w." + relationName + ")]\n        all w: World, x: w." + sourceName + ", y: w." + sourceName + " | lone x.((w." + relationName + ").y)\n}"
+  );
+}
+function transformGeneralRelation(transformer, relation) {
+  let relationName = "";
+  if (relation.getName()) {
+    relationName = getNameNoSpaces(relation);
+  } else {
+    relationName = getValidAlias(relation, "relation", transformer.aliases);
+  }
+  const sourceName = getNameNoSpaces(relation.getSource());
+  const targetName = getNameNoSpaces(relation.getTarget());
+  const sourceCardinality = getCardinalityKeyword(relation.getSourceEnd().cardinality);
+  const targetCardinality = getCardinalityKeyword(relation.getTargetEnd().cardinality);
+  transformer.addWorldFieldDeclaration(
+    (relationName + ": set " + sourceName + " " + sourceCardinality + " -> " + targetCardinality + " " + targetName).replace(/\s{2,}/g, " ")
+  );
+}
+function transformMediationRelation(transformer, relation) {
+  let relationName = "";
+  if (relation.getName()) {
+    relationName = getNameNoSpaces(relation);
+  } else {
+    relationName = getValidAlias(relation, "relation", transformer.aliases);
+  }
+  const sourceName = getNameNoSpaces(relation.getSource());
+  transformer.addFact(
+    "fact acyclic {\n        all w: World | acyclic[w." + relationName + ",w." + sourceName + "]\n}"
+  );
+  transformGeneralRelation(transformer, relation);
+}
+function transformMaterialRelation(transformer, relation) {
+  for (const rel of transformer.model.getAllRelations()) {
+    if (rel.hasDerivationStereotype() && rel.getDerivingRelation() === relation && rel.getDerivedClassStereotype() === "relator" /* RELATOR */) {
+      let materialName = "";
+      if (relation.getName()) {
+        materialName = getNameNoSpaces(relation);
+      } else {
+        materialName = getValidAlias(relation, "relation", transformer.aliases);
+      }
+      const sourceName = getNameNoSpaces(relation.getSource());
+      const targetName = getNameNoSpaces(relation.getTarget());
+      const relatorName = getNameNoSpaces(rel.getDerivedClass());
+      transformer.addWorldFieldDeclaration(
+        materialName + ": set " + sourceName + " -> " + relatorName + " -> " + targetName
+      );
+      return;
+    }
+  }
+  if (relation.getSourceEnd().isOrdered || relation.getTargetEnd().isOrdered) {
+    transformOrderedRelation(transformer, relation);
+  } else {
+    transformGeneralRelation(transformer, relation);
+  }
+}
+function transformDerivationRelation(transformer, relation) {
+  if (relation.getDerivingRelationStereotype() === "material" /* MATERIAL */ && relation.getDerivedClassStereotype() === "relator" /* RELATOR */) {
+    const material = relation.getDerivingRelation();
+    const relator = relation.getDerivedClass();
+    const materialSource = material.getSource();
+    const materialTarget = material.getTarget();
+    let mediation1 = null;
+    let mediation2 = null;
+    for (const rel of transformer.model.getAllRelations()) {
+      if (mediation1 === null && (rel.getSource() === materialSource && rel.getTarget() === relator || rel.getTarget() === materialSource && rel.getSource() === relator)) {
+        mediation1 = rel;
+      } else if (mediation2 === null && (rel.getSource() === materialTarget && rel.getTarget() === relator || rel.getTarget() === materialTarget && rel.getSource() === relator)) {
+        mediation2 = rel;
+      }
+    }
+    let materialName = "";
+    if (material.getName()) {
+      materialName = getNameNoSpaces(material);
+    } else {
+      materialName = getValidAlias(material, "relation", transformer.aliases);
+    }
+    let mediation1Name = "";
+    if (mediation1.getName()) {
+      mediation1Name = getNameNoSpaces(mediation1);
+    } else {
+      mediation1Name = getValidAlias(mediation1, "relation", transformer.aliases);
+    }
+    let mediation2Name = "";
+    if (mediation2.getName()) {
+      mediation2Name = getNameNoSpaces(mediation2);
+    } else {
+      mediation2Name = getValidAlias(mediation2, "relation", transformer.aliases);
+    }
+    const relatorName = getNameNoSpaces(relator);
+    const materialSourceName = getNameNoSpaces(materialSource);
+    const materialTargetName = getNameNoSpaces(materialTarget);
+    transformer.addFact(
+      "fact derivation {\n        all w: World, x: w." + materialSourceName + ", y: w." + materialTargetName + ", r: w." + relatorName + " | \n            x -> r -> y in w." + materialName + " iff x in r.(w." + mediation1Name + ") and y in r.(w." + mediation2Name + ")\n}"
+    );
+  }
+}
+function transformPartWholeRelation(transformer, relation) {
+  let relationName = "";
+  if (relation.getName()) {
+    relationName = getNameNoSpaces(relation);
+  } else {
+    relationName = getValidAlias(relation, "relation", transformer.aliases);
+  }
+  const wholeName = getNameNoSpaces(relation.getSource());
+  const partName = getNameNoSpaces(relation.getTarget());
+  const wholeEnd = relation.getSourceEnd();
+  let wholeEndName = "";
+  if (wholeEnd.getName()) {
+    wholeEndName = getNameNoSpaces(wholeEnd);
+  } else {
+    wholeEndName = getNameNoSpaces(relation.getSource());
+  }
+  const wholeEndAlias = getValidAlias(wholeEnd, wholeEndName, transformer.aliases);
+  if (wholeEnd.isAggregationEnd() && wholeEnd.isComposite()) {
+    let otherWholeEnds = [];
+    for (const prop of transformer.model.getAllProperties()) {
+      if (prop.isAggregationEnd() && prop !== wholeEnd) {
+        const otherWholeEnd = relation.getSourceEnd();
+        let otherWholeEndName = "";
+        if (otherWholeEnd.getName()) {
+          otherWholeEndName = getNameNoSpaces(otherWholeEnd);
+        } else {
+          otherWholeEndName = getNameNoSpaces(otherWholeEnd.container.getSource());
+        }
+        const otherWholeEndAlias = getValidAlias(otherWholeEnd, otherWholeEndName, transformer.aliases);
+        otherWholeEnds.push(otherWholeEndAlias + "[x,w]");
+      }
+    }
+    otherWholeEnds = [...new Set(otherWholeEnds)];
+    if (otherWholeEnds.length) {
+      transformer.addFact(
+        "fact composition {\n        all w: World, x : w." + partName + " | lone " + wholeEndAlias + "[x,w]\n        all w: World, x : w." + partName + " | some " + wholeEndAlias + "[x,w] implies no (" + otherWholeEnds.join("+") + ")}"
+      );
+    } else {
+      transformer.addFact(
+        "fact composition {\n        all w: World, x : w." + partName + " | lone " + wholeEndAlias + "[x,w]\n}"
+      );
+    }
+  }
+  transformer.addFact(
+    "fact acyclic {\n        all w: World | acyclic[w." + relationName + ",w." + wholeName + "]\n}"
+  );
+  transformGeneralRelation(transformer, relation);
+}
+function transformDatatypeRelation(transformer, relation) {
+  const sourceName = getNameNoSpaces(relation.getSource());
+  const targetName = getNameNoSpaces(relation.getTarget());
+  const sourceDatatype = getCorrespondingDatatype(sourceName, transformer.datatypes);
+  let relationName = "";
+  if (relation.getName()) {
+    relationName = getNameNoSpaces(relation);
+  } else {
+    relationName = getValidAlias(relation, "relation", transformer.aliases);
+  }
+  sourceDatatype[1].push(relationName + ": " + targetName);
+  const [sourceLowerBound, sourceUpperBound] = getCustomCardinality(relation.getSourceEnd().cardinality);
+  const [targetLowerBound, targetUpperBound] = getCustomCardinality(relation.getTargetEnd().cardinality);
+  let sourceFact = "";
+  let targetFact = "";
+  if (targetLowerBound && targetUpperBound) {
+    sourceFact = "all x: " + sourceName + " | #x." + relationName + ">=" + targetLowerBound + " and #x." + relationName + "<=" + targetUpperBound;
+  } else if (targetLowerBound) {
+    sourceFact = "all x: " + sourceName + " | #x." + relationName + ">=" + targetLowerBound;
+  } else if (targetUpperBound) {
+    sourceFact = "all x: " + sourceName + " | #x." + relationName + "<=" + targetUpperBound;
+  }
+  if (sourceLowerBound && sourceUpperBound) {
+    targetFact = "all x: " + targetName + " | #" + relationName + ".x>=" + sourceLowerBound + " and #" + relationName + ".x<=" + sourceUpperBound;
+  } else if (sourceLowerBound) {
+    targetFact = "all x: " + targetName + " | #" + relationName + ".x>=" + sourceLowerBound;
+  } else if (sourceUpperBound) {
+    targetFact = "all x: " + targetName + " | #" + relationName + ".x<=" + sourceUpperBound;
+  }
+  transformer.addFact(
+    "fact datatypesMultiplicity {\n        " + sourceFact + "\n        " + targetFact + "\n}"
+  );
+}
+function transformCharacterizationConstraint(transformer) {
+  let characterizations = transformer.model.getAllRelationsByStereotype("characterization" /* CHARACTERIZATION */).map((characterization) => {
+    if (characterization.getName()) {
+      return "w." + getNameNoSpaces(characterization);
+    } else {
+      return "w." + getValidAlias(characterization, "relation", transformer.aliases);
+    }
+  });
+  if (characterizations.length) {
+    let intrinsicMoments = [.../* @__PURE__ */ new Set([...transformer.model.getClassesRestrictedToIntrinsicMode(), ...transformer.model.getClassesRestrictedToQuality()])].map((moment) => "w." + getNameNoSpaces(moment));
+    if (intrinsicMoments.length) {
+      transformer.addFact(
+        "fact acyclicCharacterizations {\n        all w: World | acyclic[(" + characterizations.join("+") + "),(" + intrinsicMoments.join("+") + ")]\n}"
+      );
+    }
+  }
+}
+
+// src/libs/ontouml2alloy/ontouml2alloy.ts
+var Ontouml2Alloy = class {
+  // [element, alias]
+  constructor(input, options) {
+    if (input instanceof Project2) {
+      this.model = input.model;
+    } else if (input instanceof Package) {
+      this.model = input;
+    }
+    this.alloyCode = ["", "", ""];
+    this.datatypes = [];
+    this.enums = [];
+    this.worldFieldDeclarations = [];
+    this.worldFieldFacts = [];
+    this.facts = [];
+    this.relationPropertiesFacts = [];
+    this.funs = [];
+    this.visible = ["exists"];
+    this.aliases = [];
+  }
+  getAlloyCode() {
+    return this.alloyCode;
+  }
+  addDatatype(datatype) {
+    this.datatypes.push(datatype);
+  }
+  addEnum(_enum) {
+    this.enums.push(_enum);
+  }
+  addWorldFieldDeclaration(declaration) {
+    this.worldFieldDeclarations.push(declaration);
+  }
+  addWorldFieldFact(fact) {
+    this.worldFieldFacts.push(fact);
+  }
+  addFact(fact) {
+    this.facts.push(fact);
+  }
+  addRelationPropertiesFact(relationPropertiesFact) {
+    this.relationPropertiesFacts.push(relationPropertiesFact);
+  }
+  addFun(fun) {
+    this.funs.push(fun);
+  }
+  addVisible(term) {
+    this.visible.push(term);
+  }
+  transform() {
+    this.transformClasses();
+    this.transformGeneralizations();
+    this.transformGeneralizationSets();
+    this.transformProperties();
+    this.transformRelations();
+    this.worldFieldFacts = [...new Set(this.worldFieldFacts)];
+    this.facts = [...new Set(this.facts)];
+    this.relationPropertiesFacts = [...new Set(this.relationPropertiesFacts)];
+    this.funs = [...new Set(this.funs)];
+    this.writePreamble();
+    this.writeDatatypes();
+    this.writeEnums();
+    this.writeWorldSignature();
+    this.writeFacts();
+    this.writeFuns();
+    this.writeRuns();
+    this.writeWorldStructureModule();
+    this.writeOntologicalPropertiesModule();
+  }
+  writePreamble() {
+    this.alloyCode[0] += "module main\n\nopen world_structure[World]\nopen ontological_properties[World]\nopen util/relation\nopen util/sequniv\nopen util/ternary\n\nabstract sig Endurant {}\n\nsig Object extends Endurant {}\n\nsig Aspect extends Endurant {}\n\nsig Datatype {}\n\n";
+  }
+  writeDatatypes() {
+    for (const datatype of this.datatypes) {
+      const datatypeName = datatype[0];
+      const datatypeProperties = [...new Set(datatype[1])];
+      if (datatypeProperties.length) {
+        this.alloyCode[0] += "sig " + datatypeName + " in Datatype {\n        " + datatypeProperties.join(",\n        ") + "\n}\n\n";
+      } else {
+        this.alloyCode[0] += "sig " + datatypeName + " in Datatype {}\n\n";
+      }
+    }
+  }
+  writeEnums() {
+    if (this.enums.length) {
+      this.alloyCode[0] += this.enums.join("\n\n") + "\n\n";
+    }
+  }
+  writeWorldSignature() {
+    this.alloyCode[0] += "abstract sig World {\n        exists: some Endurant,\n        " + this.worldFieldDeclarations.join(",\n        ") + "\n}";
+    if (this.worldFieldFacts.length) {
+      this.alloyCode[0] += " {\n        " + this.worldFieldFacts.join("\n        ") + "\n}";
+    }
+    this.alloyCode[0] += "\n\n";
+  }
+  writeFacts() {
+    this.alloyCode[0] += "fact additionalFacts {\n        continuous_existence[exists]\n        elements_existence[Endurant,exists]\n}\n\n";
+    if (this.relationPropertiesFacts.length) {
+      this.alloyCode[0] += "fact relationProperties {\n        " + this.relationPropertiesFacts.join("\n        ") + "\n}\n\n";
+    }
+    if (this.facts.length) {
+      this.alloyCode[0] += this.facts.join("\n\n") + "\n\n";
+    }
+  }
+  writeFuns() {
+    this.alloyCode[0] += "fun visible : World->univ {\n        " + this.visible.join("+") + "\n}\n\n";
+    if (this.funs.length) {
+      this.alloyCode[0] += this.funs.join("\n\n") + "\n\n";
+    }
+  }
+  writeRuns() {
+    this.alloyCode[0] += "-- Suggested run predicates\nrun singleWorld for 10 but 1 World, 7 Int\nrun linearWorlds for 10 but 3 World, 7 Int\nrun multipleWorlds for 10 but 4 World, 7 Int\nrun singleWorld for 20 but 1 World, 7 Int\nrun linearWorlds for 20 but 3 World, 7 Int\nrun multipleWorlds for 20 but 4 World, 7 Int\n";
+  }
+  writeWorldStructureModule() {
+    this.alloyCode[1] += "module world_structure[World]\n\nsome abstract sig TemporalWorld extends World {\n        next: set TemporalWorld -- Immediate next moments\n} {\n        this not in this.^(@next) -- There are no temporal cicles\n        lone ((@next).this) -- A world can be the immediate next momment of at maximum one world\n}\n\none sig CurrentWorld extends TemporalWorld {} {\n        next in FutureWorld\n}\n\nsig PastWorld extends TemporalWorld {} {\n        next in (PastWorld + CounterfactualWorld + CurrentWorld)\n        CurrentWorld in this.^@next -- All past worlds can reach the current moment\n}\n\nsig FutureWorld extends TemporalWorld {} {\n        next in FutureWorld\n        this in CurrentWorld.^@next -- All future worlds can be reached by the current moment\n}\n\nsig CounterfactualWorld extends TemporalWorld {} {\n        next in CounterfactualWorld\n        this in PastWorld.^@next -- All past worlds can reach the counterfactual moment\n}\n\n-- Elements cannot die and come to life later\npred continuous_existence [exists: World->univ] {\n        all w : World, x: (@next.w).exists | (x not in w.exists) => (x not in (( w. ^next).exists))\n}\n\n-- All elements must exists in at least one world\npred elements_existence [elements: univ, exists: World->univ] {\n        all x: elements | some w: World | x in w.exists\n}\n\n-- Run predicate for a single World\npred singleWorld {\n        #World=1\n}\n\n-- Run predicate for linear Worlds (Past, Current, Future)\npred linearWorlds {\n        #World=3 and #PastWorld=1 and #FutureWorld=1\n}\n\n-- Run predicate for multiple Worlds (Past, Counterfactual, Current, Future)\npred multipleWorlds {\n        #World=4 and #PastWorld=1 and #CounterfactualWorld=1 and #FutureWorld=1\n}\n";
+  }
+  writeOntologicalPropertiesModule() {
+    this.alloyCode[2] += "module ontological_properties[World]\n\n-- This predicate states that a class is rigid\npred rigidity [Class: univ->univ, Nature: univ, exists: univ->univ] {\n        all w1: World, p: univ | p in w1.exists and p in w1.Class implies\n            all w2: World | w1!=w2 and p in w2.exists implies p in w2.Class\n}\n\n-- This predicate states that a class is anti-rigid\npred antirigidity [Class: set univ->univ, Nature: univ, exists: univ->univ] {\n        all x: Nature | #World>=2 implies (some disj w1,w2: World |\n            x in w1.exists and x in w1.Class and x in w2.exists and x not in w2.Class)\n}\n\n-- This predicate makes the source relation end immutable\npred immutable_source [Target: World->univ, rel: univ->univ->univ] {\n        all w1: World, x: univ | x in w1.Target implies\n            all w2: World | x in w2.Target implies (w1.rel).x=(w2.rel).x\n}\n\n-- This predicate makes the target relation end immutable\npred immutable_target [Source: World->univ, rel: univ->univ->univ] {\n        all w1: World, x: univ | x in w1.Source implies\n            all w2: World | x in w2.Source implies x.(w1.rel)=x.(w2.rel)\n}\n";
+  }
+  transformClasses() {
+    const classes = this.model.getAllClasses();
+    for (const _class of classes) {
+      transformClass(this, _class);
+    }
+    transformAdditionalClassConstraints(this);
+    transformAdditionalDatatypeConstraints(this);
+    return true;
+  }
+  transformGeneralizations() {
+    const generalizations = this.model.getAllGeneralizations();
+    for (const gen of generalizations) {
+      transformGeneralization(this, gen);
+    }
+  }
+  transformGeneralizationSets() {
+    const generalizationSets = this.model.getAllGeneralizationSets();
+    for (const genSet of generalizationSets) {
+      transformGeneralizationSet(this, genSet);
+    }
+  }
+  transformRelations() {
+    const relations = this.model.getAllRelations();
+    for (const relation of relations) {
+      transformRelation(this, relation);
+    }
+    transformCharacterizationConstraint(this);
+  }
+  transformProperties() {
+    const properties = this.model.getAllProperties();
+    for (const property of properties) {
+      transformProperty(this, property);
+    }
+  }
+  run() {
+    this.transform();
+    return {
+      result: {
+        mainModule: this.getAlloyCode()[0],
+        worldStructureModule: this.getAlloyCode()[1],
+        ontologicalPropertiesModule: this.getAlloyCode()[2]
+      },
+      issues: void 0
+    };
   }
 };
 
@@ -130040,7 +130950,7 @@ function writerCardinalityAxiom(transformer, relation, direction) {
 // src/libs/ontouml2gufo/class_functions.ts
 var N32 = require_lib2();
 var { namedNode: namedNode2, literal: literal2 } = N32.DataFactory;
-function transformClass(transformer, _class) {
+function transformClass2(transformer, _class) {
   const { uriManager } = transformer;
   if (uriManager.getUriFromTaggedValues(_class) || getUriFromXsdMapping(_class) || _class.isPrimitiveDatatype()) {
     return true;
@@ -130242,7 +131152,7 @@ function writeDisjointnessAxioms(transformer, classes) {
 }
 
 // src/libs/ontouml2gufo/generalization_functions.ts
-function transformGeneralization(transformer, generalization) {
+function transformGeneralization2(transformer, generalization) {
   const specific = generalization.specific;
   const general = generalization.general;
   const specificUri = transformer.getUri(specific);
@@ -130258,7 +131168,7 @@ function transformGeneralization(transformer, generalization) {
 // src/libs/ontouml2gufo/generalization_set_functions.ts
 var N33 = require_lib2();
 var { namedNode: namedNode3 } = N33.DataFactory;
-var transformGeneralizationSet = (transformer, genSet) => {
+var transformGeneralizationSet2 = (transformer, genSet) => {
   if (!genSet.generalizations || genSet.generalizations.length === 0 || !genSet.isComplete && !genSet.isDisjoint)
     return;
   const classChildren = genSet.generalizations.map((gen) => gen.specific).filter((child) => child.type === "Class" /* CLASS_TYPE */);
@@ -130733,7 +131643,7 @@ var Ontouml2Gufo5 = class {
   transformClasses() {
     const classes = this.model.getAllClasses();
     for (const _class of classes) {
-      transformClass(this, _class);
+      transformClass2(this, _class);
     }
     writeDisjointnessAxioms(this, classes);
     return true;
@@ -130747,7 +131657,7 @@ var Ontouml2Gufo5 = class {
   transformRelations() {
     const relations = this.model.getAllRelations();
     for (const relation of relations) {
-      transformRelation(this, relation);
+      transformRelation2(this, relation);
       if (this.options.createInverses) {
         transformInverseRelation(this, relation);
       }
@@ -130762,13 +131672,13 @@ var Ontouml2Gufo5 = class {
   transformGeneralizations() {
     const generalizations = this.model.getAllGeneralizations();
     for (const gen of generalizations) {
-      transformGeneralization(this, gen);
+      transformGeneralization2(this, gen);
     }
   }
   transformGeneralizationSets() {
     const generalizationSets = this.model.getAllGeneralizationSets();
     for (const genSet of generalizationSets) {
-      transformGeneralizationSet(this, genSet);
+      transformGeneralizationSet2(this, genSet);
     }
   }
   // static run(_package: Package, options?: Partial<Options>): { output: string; issues: Issue[] } {
@@ -130911,7 +131821,7 @@ var getPackageUri = (ontouml2gufo, pkg) => {
 };
 
 // src/libs/ontouml2gufo/relation_functions.ts
-function transformRelation(transformer, relation) {
+function transformRelation2(transformer, relation) {
   if (relation.hasInstantiationStereotype()) {
     transformInstantiation(transformer, relation);
     return;
@@ -131986,6 +132896,7 @@ var utils2 = {
   NodeView,
   ORDERLESS_LEVEL,
   OntologicalNature,
+  Ontouml2Alloy,
   Ontouml2Db,
   Ontouml2DbOptions,
   Ontouml2Gufo,
