@@ -1,0 +1,10 @@
+import { OntoumlElement, Class, Relation, Generalization, Cardinality } from '../ontouml';
+export declare function getNameNoSpaces(element: OntoumlElement): any;
+export declare function isTopLevel(_class: Class, generalizations: Generalization[]): boolean;
+export declare function getCardinalityKeyword(cardinality: Cardinality): "one" | "" | "lone" | "set" | "some";
+export declare function isCustomCardinality(cardinality: Cardinality): boolean;
+export declare function getCustomCardinality(cardinality: Cardinality): any[];
+export declare function getValidAlias(element: OntoumlElement, name: string, aliases: [OntoumlElement, string][]): string;
+export declare function isMaterialConnectedToDerivation(material: Relation, relations: Relation[]): boolean;
+export declare function holdsBetweenDatatypes(relation: Relation): boolean;
+export declare function getCorrespondingDatatype(datatypeName: string, datatypes: [string, string[]][]): [string, string[]] | null;
